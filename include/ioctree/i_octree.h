@@ -1318,6 +1318,51 @@ inline bool Octree::KnnNeighbors(const Octant *octant, const float *query,
   return heap.Full() && Inside(query, heap.WorstDist(), octant);
 }
 
+// 递归 AABB 范围搜索，收集指定包围盒内的所有点数据指针。
+inline void Octree::SearchByBox(const Octant *octant, const float *min,
+                                const float *max,
+                                std::vector<float *> &result_indices) {
+  if (!octant->is_active_) return;
+  float cur_min[3] = {octant->x_ - octant->extent_,
+                      octant->y_ - octant->extent_,
+                      octant->z_ - octant->extent_};
+  float cur_max[3] = {octant->x_ + octant->extent_,
+                      octant->y_ + octant->extent_,
+                      octant->z_ + octant->extent_};
+  if (cur_min[0] > max[0] || min[0] > cur_max[0]) return;
+  if (cur_min[1] > max[1] || min[1] > cur_max[1]) return;
+  if (cur_min[2] > max[2] || min[2] > cur_max[2]) return;
+  if (cur_min[0] >= min[0] && cur_min[1] >= min[1] && cur_min[2] >= min[2] &&
+      cur_max[0] <= max[0] && cur_max[1] <= max[1] && cur_max[2] <= max[2]) {
+    std::vector<const Octant *> leaf_nodes;
+    GetLeafNodes(octant, leaf_nodes);
+    for (size_t k = 0; k < leaf_nodes.size(); k++) {
+      const size_t size = leaf_nodes[k]->points_.size();
+      const size_t result_size = result_indices.size();
+      result_indices.resize(result_size + size);
+      for (size_t i = 0; i < size; ++i) {
+        result_indices[result_size + i] = leaf_nodes[k]->points_[i];
+      }
+    }
+    return;
+  }
+  if (octant->child_ == nullptr) {
+    const size_t size = octant->points_.size();
+    for (size_t i = 0; i < size; ++i) {
+      const float *p = octant->points_[i];
+      if (p[0] >= min[0] && p[0] <= max[0] && p[1] >= min[1] && p[1] <= max[1] &&
+          p[2] >= min[2] && p[2] <= max[2]) {
+        result_indices.push_back(octant->points_[i]);
+      }
+    }
+    return;
+  }
+  for (size_t c = 0; c < 8; ++c) {
+    if (octant->child_[c] == 0) continue;
+    SearchByBox(octant->child_[c], min, max, result_indices);
+  }
+}
+
 // === 搜索 — 公开接口 ===
 
 // 半径搜索：返回查询点半径范围内所有点的原始索引（需 store_index_=true）。
@@ -1462,6 +1507,25 @@ int32_t Octree::KnnNeighbors(const PointT &query_in, int k,
     distances[i] = data[i].dist;
   }
   return data.size();
+}
+
+// 按 AABB 对角范围搜索，返回范围内所有点的坐标。
+template <typename ContainerT>
+void Octree::SearchByBox(const float *min, const float *max,
+                         ContainerT &result_points) {
+  result_points.clear();
+  if (root_ == 0) return;
+  std::vector<float *> points_ptr;
+  SearchByBox(root_, min, max, points_ptr);
+  result_points.resize(points_ptr.size());
+  using PointType = typename ContainerT::value_type;
+  for (size_t i = 0; i < points_ptr.size(); i++) {
+    PointType pt;
+    pt.x = points_ptr[i][0];
+    pt.y = points_ptr[i][1];
+    pt.z = points_ptr[i][2];
+    result_points[i] = pt;
+  }
 }
 
 // === 记录 / 调试 ===
@@ -1736,82 +1800,6 @@ inline void Octree::WriteInfoRecord(std::string name, bool clear) {
   info_record_.WriteToTxt(name);
   if (clear) {
     info_record_.Clear();
-  }
-}
-
-// === SearchByBox 实现 ===
-
-// 递归 AABB 范围搜索，收集指定包围盒内的所有点数据指针。
-inline void Octree::SearchByBox(const Octant *octant, const float *min,
-                                const float *max,
-                                std::vector<float *> &result_indices) {
-  if (!octant->is_active_) return;
-
-  // 计算当前节点的 AABB
-  float cur_min[3] = {octant->x_ - octant->extent_,
-                      octant->y_ - octant->extent_,
-                      octant->z_ - octant->extent_};
-  float cur_max[3] = {octant->x_ + octant->extent_,
-                      octant->y_ + octant->extent_,
-                      octant->z_ + octant->extent_};
-
-  // AABB 不相交：剪枝
-  if (cur_min[0] > max[0] || min[0] > cur_max[0]) return;
-  if (cur_min[1] > max[1] || min[1] > cur_max[1]) return;
-  if (cur_min[2] > max[2] || min[2] > cur_max[2]) return;
-
-  // 当前节点完全在搜索盒内：收集整棵子树的所有点
-  if (cur_min[0] >= min[0] && cur_min[1] >= min[1] && cur_min[2] >= min[2] &&
-      cur_max[0] <= max[0] && cur_max[1] <= max[1] && cur_max[2] <= max[2]) {
-    std::vector<const Octant *> leaf_nodes;
-    GetLeafNodes(octant, leaf_nodes);
-    for (size_t k = 0; k < leaf_nodes.size(); k++) {
-      const size_t size = leaf_nodes[k]->points_.size();
-      const size_t result_size = result_indices.size();
-      result_indices.resize(result_size + size);
-      for (size_t i = 0; i < size; ++i) {
-        result_indices[result_size + i] = leaf_nodes[k]->points_[i];
-      }
-    }
-    return;
-  }
-
-  // 叶子节点：逐点判断
-  if (octant->child_ == nullptr) {
-    const size_t size = octant->points_.size();
-    for (size_t i = 0; i < size; ++i) {
-      const float *p = octant->points_[i];
-      if (p[0] >= min[0] && p[0] <= max[0] && p[1] >= min[1] && p[1] <= max[1] &&
-          p[2] >= min[2] && p[2] <= max[2]) {
-        result_indices.push_back(octant->points_[i]);
-      }
-    }
-    return;
-  }
-
-  // 枝干节点：递归子节点
-  for (size_t c = 0; c < 8; ++c) {
-    if (octant->child_[c] == 0) continue;
-    SearchByBox(octant->child_[c], min, max, result_indices);
-  }
-}
-
-// 公开接口：按 AABB 范围搜索，返回 PointT 格式的点坐标。
-template <typename ContainerT>
-void Octree::SearchByBox(const float *min, const float *max,
-                         ContainerT &result_points) {
-  result_points.clear();
-  if (root_ == 0) return;
-  std::vector<float *> points_ptr;
-  SearchByBox(root_, min, max, points_ptr);
-  result_points.resize(points_ptr.size());
-  using PointType = typename ContainerT::value_type;
-  for (size_t i = 0; i < points_ptr.size(); i++) {
-    PointType pt;
-    pt.x = points_ptr[i][0];
-    pt.y = points_ptr[i][1];
-    pt.z = points_ptr[i][2];
-    result_points[i] = pt;
   }
 }
 
