@@ -24,6 +24,11 @@ mapping:
     extrinsic_R: [ 1, 0, 0, 
                    0, 1, 0, 
                    0, 0, 1]
+    use_ioctree: true            # true: use i-Octree (LRU managed), false: use ikd-Tree
+    ioctree_lru_capacity: 500000  # i-Octree LRU max leaf nodes (only when use_ioctree=true)
+    ioctree_points_dis_min: 0.01  # i-Octree min distance to insert new point (only when use_ioctree=true)
+    ioctree_voxel_downsample_size: 0.5  # i-Octree voxel downsample grid size (only when use_ioctree=true)
+    ioctree_min_extent: 0.1   # i-Octree minimum node half-size (only when use_ioctree=true)
 
 publish:
     path_en:  false

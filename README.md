@@ -1,4 +1,28 @@
+## 主要优化内容
+1. 为i-octree添加了LRU内存管理并进行了代码工程化优化
+2. 将i-octreee整合至FAST-LIO2，在yaml中可以自行配置使用i-octree还是ikd-tree
+**原理与使用说明如下**
+
+<div align="center">
+    <img src="doc/page1.avif" width=100% />
+</div>
+
+<div align="center">
+    <img src="doc/page2.avif" width=100% />
+</div>
+
+<div align="center">
+    <img src="doc/page3.avif" width=100% />
+</div>
+
+<div align="center">
+    <img src="doc/page4.avif" width=100% />
+</div>
+
 ## Related Works and Extended Application
+**本项目新增：**
+1. [i-octree](https://github.com/zhujun3753/i-octree)：i-Octree: A Fast, Lightweight, and Dynamic Octree for Proximity Search
+2. [emhash](https://github.com/ktprime/emhash)
 
 **SLAM:**
 

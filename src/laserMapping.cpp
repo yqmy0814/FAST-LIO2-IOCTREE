@@ -59,6 +59,7 @@
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
+#include <ioctree/ioctree_map.h>
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
@@ -69,7 +70,7 @@
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
 double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN], s_plot8[MAXN], s_plot9[MAXN], s_plot10[MAXN], s_plot11[MAXN];
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
-int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
+int    kdtree_size_st = 0, tree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
 bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
 /**************************/
 
@@ -94,6 +95,7 @@ int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudVal
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
+bool   use_ioctree = false;
 int lidar_type;
 
 vector<vector<int>>  pointSearchInd_surf; 
@@ -117,7 +119,8 @@ PointCloudXYZI::Ptr _featsArray;
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
-KD_TREE<PointType> ikdtree;
+std::unique_ptr<KD_TREE<PointType>> ikdtree = nullptr;
+std::unique_ptr<IOctreeMap<PointType>> ioctree = nullptr;
 
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
@@ -221,9 +224,11 @@ void RGBpointBodyLidarToIMU(PointType const * const pi, PointType * const po)
 
 void points_cache_collect()
 {
-    PointVector points_history;
-    ikdtree.acquire_removed_points(points_history);
-    // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
+    if (!use_ioctree) {
+        PointVector points_history;
+        ikdtree->acquire_removed_points(points_history);
+        // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
+    }
 }
 
 BoxPointType LocalMap_Points;
@@ -272,7 +277,7 @@ void lasermap_fov_segment()
 
     points_cache_collect();
     double delete_begin = omp_get_wtime();
-    if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
+    if(cub_needrm.size() > 0 && !use_ioctree) kdtree_delete_counter = ikdtree->Delete_Point_Boxes(cub_needrm);
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
@@ -426,6 +431,24 @@ bool sync_packages(MeasureGroup &meas)
 int process_increments = 0;
 void map_incremental()
 {
+    if (use_ioctree) {
+        // ioctree 模式：内部做降采样
+        PointVector all_to_add;
+        std::vector<PointVector> all_nearest;
+        all_to_add.reserve(feats_down_size);
+        all_nearest.reserve(feats_down_size);
+        for (int i = 0; i < feats_down_size; i++) {
+            pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+            all_to_add.push_back(feats_down_world->points[i]);
+            all_nearest.push_back(Nearest_Points[i]);
+        }
+        double st_time = omp_get_wtime();
+        if (!all_to_add.empty()) {
+            ioctree->AddPoints(all_to_add, all_nearest);
+        }
+        add_point_size = all_to_add.size();
+        kdtree_incremental_time = omp_get_wtime() - st_time;
+    } else {
     PointVector PointToAdd;
     PointVector PointNoNeedDownsample;
     PointToAdd.reserve(feats_down_size);
@@ -467,10 +490,11 @@ void map_incremental()
     }
 
     double st_time = omp_get_wtime();
-    add_point_size = ikdtree.Add_Points(PointToAdd, true);
-    ikdtree.Add_Points(PointNoNeedDownsample, false); 
+    add_point_size = ikdtree->Add_Points(PointToAdd, true);
+    ikdtree->Add_Points(PointNoNeedDownsample, false); 
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
+    }
 }
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI(500000, 1));
@@ -667,7 +691,11 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         if (ekfom_data.converge)
         {
             /** Find the closest surfaces in the map **/
-            ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            if (use_ioctree) {
+                ioctree->NearestSearch(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            } else {
+                ikdtree->Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            }
             point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false : true;
         }
 
@@ -787,6 +815,15 @@ int main(int argc, char** argv)
     nh.param<bool>("feature_extract_enable", p_pre->feature_enabled, false);
     nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
     nh.param<bool>("mapping/extrinsic_est_en", extrinsic_est_en, true);
+    nh.param<bool>("mapping/use_ioctree", use_ioctree, false);
+    int ioctree_lru_capacity = 500000;
+    float ioctree_points_dis_min = 0.01;
+    float ioctree_voxel_downsample_size = 0.3;
+    float ioctree_min_extent = 0.1;
+    nh.param<int>("mapping/ioctree_lru_capacity", ioctree_lru_capacity, 500000);
+    nh.param<float>("mapping/ioctree_points_dis_min", ioctree_points_dis_min, 0.01);
+    nh.param<float>("mapping/ioctree_voxel_downsample_size", ioctree_voxel_downsample_size, 0.3);
+    nh.param<float>("mapping/ioctree_min_extent", ioctree_min_extent, 0.1);
     nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false);
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
@@ -794,6 +831,20 @@ int main(int argc, char** argv)
 
     p_pre->lidar_type = lidar_type;
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
+
+    /*** init tree ***/
+    if (use_ioctree) {
+        IOctreeConfig ioctree_cfg;
+        ioctree_cfg.min_extent = ioctree_min_extent;
+        ioctree_cfg.voxel_downsample_size = ioctree_voxel_downsample_size;
+        ioctree_cfg.lru_capacity = ioctree_lru_capacity;
+        ioctree_cfg.points_dis_min = ioctree_points_dis_min;
+        ioctree = std::make_unique<IOctreeMap<PointType>>(ioctree_cfg);
+        cout << "[IOCTREE] i-Octree enabled, lru=" << ioctree_lru_capacity << " voxel=" << ioctree_voxel_downsample_size << " min_extent=" << ioctree_min_extent << endl;
+    } else {
+        ikdtree = std::make_unique<KD_TREE<PointType>>();
+        cout << "[IKDTREE] ikd-Tree enabled" << endl;
+    }
     
     path.header.stamp    = ros::Time::now();
     path.header.frame_id ="camera_init";
@@ -897,31 +948,36 @@ int main(int argc, char** argv)
 
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
                             false : true;
-            /*** Segment the map in lidar FOV ***/
-            lasermap_fov_segment();
+            /*** Segment the map in lidar FOV (only for ikd-Tree) ***/
+            if (!use_ioctree) lasermap_fov_segment();
 
             /*** downsample the feature points in a scan ***/
             downSizeFilterSurf.setInputCloud(feats_undistort);
             downSizeFilterSurf.filter(*feats_down_body);
             t1 = omp_get_wtime();
             feats_down_size = feats_down_body->points.size();
-            /*** initialize the map kdtree ***/
-            if(ikdtree.Root_Node == nullptr)
+            /*** initialize the map tree ***/
+            bool tree_empty = use_ioctree ? (ioctree->PointsSize() == 0) : (ikdtree->Root_Node == nullptr);
+            if(tree_empty)
             {
                 if(feats_down_size > 5)
                 {
-                    ikdtree.set_downsample_param(filter_size_map_min);
                     feats_down_world->resize(feats_down_size);
                     for(int i = 0; i < feats_down_size; i++)
                     {
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
-                    ikdtree.Build(feats_down_world->points);
+                    if (use_ioctree) {
+                        ioctree->Build(feats_down_world->points);
+                    } else {
+                        ikdtree->set_downsample_param(filter_size_map_min);
+                        ikdtree->Build(feats_down_world->points);
+                    }
                 }
                 continue;
             }
-            int featsFromMapNum = ikdtree.validnum();
-            kdtree_size_st = ikdtree.size();
+            int featsFromMapNum = use_ioctree ? ioctree->PointsSize() : ikdtree->validnum();
+            kdtree_size_st = use_ioctree ? ioctree->PointsSize() : ikdtree->size();
             
             // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
 
@@ -941,10 +997,12 @@ int main(int argc, char** argv)
 
             if(0) // If you need to see map point, change to "if(1)"
             {
-                PointVector ().swap(ikdtree.PCL_Storage);
-                ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
-                featsFromMap->clear();
-                featsFromMap->points = ikdtree.PCL_Storage;
+                if (!use_ioctree) {
+                    PointVector ().swap(ikdtree->PCL_Storage);
+                    ikdtree->flatten(ikdtree->Root_Node, ikdtree->PCL_Storage, NOT_RECORD);
+                    featsFromMap->clear();
+                    featsFromMap->points = ikdtree->PCL_Storage;
+                }
             }
 
             pointSearchInd_surf.resize(feats_down_size);
@@ -987,7 +1045,7 @@ int main(int argc, char** argv)
             if (runtime_pos_log)
             {
                 frame_num ++;
-                kdtree_size_end = ikdtree.size();
+                tree_size_end = use_ioctree ? ioctree->PointsSize() : ikdtree->size();
                 aver_time_consu = aver_time_consu * (frame_num - 1) / frame_num + (t5 - t0) / frame_num;
                 aver_time_icp = aver_time_icp * (frame_num - 1)/frame_num + (t_update_end - t_update_start) / frame_num;
                 aver_time_match = aver_time_match * (frame_num - 1)/frame_num + (match_time)/frame_num;
@@ -1002,7 +1060,7 @@ int main(int argc, char** argv)
                 s_plot5[time_log_counter] = kdtree_delete_counter;
                 s_plot6[time_log_counter] = kdtree_delete_time;
                 s_plot7[time_log_counter] = kdtree_size_st;
-                s_plot8[time_log_counter] = kdtree_size_end;
+                s_plot8[time_log_counter] = tree_size_end;
                 s_plot9[time_log_counter] = aver_time_consu;
                 s_plot10[time_log_counter] = add_point_size;
                 time_log_counter ++;
