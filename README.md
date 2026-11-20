@@ -21,8 +21,7 @@
 
 ## Related Works and Extended Application
 **本项目新增：**
-1. [i-octree](https://github.com/zhujun3753/i-octree)：i-Octree: A Fast, Lightweight, and Dynamic Octree for Proximity Search
-2. [emhash](https://github.com/ktprime/emhash)
+[i-octree](https://github.com/zhujun3753/i-octree)：i-Octree: A Fast, Lightweight, and Dynamic Octree for Proximity Search
 
 **SLAM:**
 

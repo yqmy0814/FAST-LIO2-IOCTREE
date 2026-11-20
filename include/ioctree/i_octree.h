@@ -33,8 +33,6 @@
 #include <utility>
 #include <vector>
 
-#include "hash_table6.hpp"
-
 namespace thuni {
 
 class Octree;
@@ -268,7 +266,7 @@ class Octree {
 
   // === LRU 管理 ===
 
-  // 数组模拟双向链表 + 哈希表 O(1) 定位，淘汰最久未修改的叶子。
+  // 数组模拟双向链表，淘汰最久未修改的叶子。
   // 叶子在四个时机操作 LRU：构造（注册）、修改（touch
   // MRU）、分裂（移除）、析构（移除）。
   struct LruNode {
@@ -278,18 +276,17 @@ class Octree {
   };
   std::vector<LruNode> lru_nodes_;           // 链表节点数组
   std::vector<int> lru_free_slots_;          // 空闲槽位回收列表
-  emhash6::HashMap<Octant *, int> lru_map_;  // Octant* → lru_nodes_ 下标
   int lru_mru_ = -1, lru_lru_ = -1;          // 链表头尾下标
   int lru_count_ = 0;                        // 当前 LRU 节点数
   int lru_capacity_ = 500000;                // LRU 最大容量
 
-  // 从 LRU 链表+哈希表中移除指定条目
+  // 从 LRU 链表中移除指定条目
   void LruRemove(int idx);
 
   // 分配一个 LRU 链表节点。优先复用空闲槽位，否则追加新元素。
   int LruAllocNode(Octant *octant);
 
-  // 释放一个 LRU 链表节点：从哈希表删除，槽位回收到空闲列表
+  // 释放一个 LRU 链表节点：槽位回收到空闲列表
   void LruFreeNode(int idx);
 
   // 将节点移到链表头部（MRU 端）。已在头部时直接返回。
@@ -526,7 +523,7 @@ inline void Octree::SetLruCapacity(int capacity) { lru_capacity_ = capacity; }
 
 // === LRU 管理 ===
 
-// 为 octant 分配 LRU 链表节点并注册到哈希表。
+// 为 octant 分配 LRU 链表节点。
 // 优先复用空闲槽位，否则在数组末尾追加，返回分配的下标。
 inline int Octree::LruAllocNode(Octant *octant) {
   int idx;
@@ -538,14 +535,12 @@ inline int Octree::LruAllocNode(Octant *octant) {
     idx = static_cast<int>(lru_nodes_.size());
     lru_nodes_.push_back({octant, -1, -1});
   }
-  lru_map_[octant] = idx;
   lru_count_++;
   return idx;
 }
 
-// 释放 LRU 节点占用的哈希表条目和槽位，回收到空闲列表供复用。
+// 释放 LRU 节点占用的槽位，回收到空闲列表供复用。
 inline void Octree::LruFreeNode(int idx) {
-  lru_map_.erase(lru_nodes_[idx].octant);
   lru_nodes_[idx].octant = nullptr;
   lru_free_slots_.push_back(idx);
   lru_count_--;
@@ -566,7 +561,7 @@ inline void Octree::LruTouch(int idx) {
   if (lru_lru_ == -1) lru_lru_ = idx;
 }
 
-// 从 LRU 链表和哈希表中移除指定条目，同时更新头尾指针。
+// 从 LRU 链表中移除指定条目，同时更新头尾指针。
 inline void Octree::LruRemove(int idx) {
   LruNode &node = lru_nodes_[idx];
   if (node.prev >= 0) lru_nodes_[node.prev].next = node.next;
@@ -687,7 +682,6 @@ ContainerT Octree::GetData() {
 inline void Octree::Clear() {
   delete root_;
   root_ = 0;
-  lru_map_.clear();
   lru_free_slots_.clear();
   lru_nodes_.clear();
   lru_mru_ = lru_lru_ = -1;
